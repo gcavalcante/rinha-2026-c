@@ -18,7 +18,7 @@ services:
       - rinha-net
 
   api1:
-    image: gdcavalcante/rinha-2026-c-exact-i16:100k-fast8-rerank64
+    image: image: gdcavalcante/rinha-2026-c-exact-i16:500k-bucket-neighbors-th2
     environment:
       - SOCKET_PATH=/run/sock/api1.sock
       - THREADS=1
@@ -33,7 +33,7 @@ services:
       - rinha-net
 
   api2:
-    image: gdcavalcante/rinha-2026-c-exact-i16:100k-fast8-rerank64
+    image: image: gdcavalcante/rinha-2026-c-exact-i16:500k-bucket-neighbors-th2
     environment:
       - SOCKET_PATH=/run/sock/api2.sock
       - THREADS=1
