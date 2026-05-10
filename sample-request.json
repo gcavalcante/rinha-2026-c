@@ -1,7 +1,0 @@
-{
-  "transaction": {"amount": 1200.50, "installments": 1, "requested_at": "2026-05-09T10:00:00Z"},
-  "customer": {"avg_amount": 300.0, "tx_count_24h": 2, "known_merchants": ["m1"]},
-  "merchant": {"id": "m2", "mcc": "5411", "avg_amount": 200.0},
-  "terminal": {"is_online": true, "card_present": false, "km_from_home": 10.0},
-  "last_transaction": {"timestamp": "2026-05-09T09:00:00Z", "km_from_current": 2.0}
-}
