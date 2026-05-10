@@ -26,7 +26,10 @@
 #endif
 
 #define DIMS 16
-#define MAGIC 0x52494E4849504B31ULL /* RINHIPK1 */
+#define FULL_DIMS 16
+#define FAST_DIMS 8
+#define TOP_CANDIDATES 64
+#define MAGIC 0x315346484E4952ULL /* RINHFS1 */
 #define REQ_MAX 16384
 #define Q 8192
 
@@ -36,7 +39,8 @@ typedef struct {
 } StaticResp;
 
 static uint32_t g_count;
-static int16_t *g_vectors;
+static int16_t *g_full_vectors;
+static int16_t *g_fast_vectors;
 static uint8_t *g_labels;
 static size_t g_map_len;
 
@@ -61,7 +65,7 @@ static const StaticResp SCORE_RESP[6] = {
     { "HTTP/1.1 200 OK\r\nConnection: keep-alive\r\nContent-Type: application/json\r\nContent-Length: 35\r\n\r\n{\"approved\":true,\"fraud_score\":0.2}",
       sizeof("HTTP/1.1 200 OK\r\nConnection: keep-alive\r\nContent-Type: application/json\r\nContent-Length: 35\r\n\r\n{\"approved\":true,\"fraud_score\":0.2}") - 1 },
     { "HTTP/1.1 200 OK\r\nConnection: keep-alive\r\nContent-Type: application/json\r\nContent-Length: 36\r\n\r\n{\"approved\":false,\"fraud_score\":0.4}",
-      sizeof("HTTP/1.1 200 OK\r\nConnection: keep-alive\r\nContent-Type: application/json\r\nContent-Length: 35\r\n\r\n{\"approved\":true,\"fraud_score\":0.4}") - 1 },
+      sizeof("HTTP/1.1 200 OK\r\nConnection: keep-alive\r\nContent-Type: application/json\r\nContent-Length: 36\r\n\r\n{\"approved\":false,\"fraud_score\":0.4}") - 1 },
     { "HTTP/1.1 200 OK\r\nConnection: keep-alive\r\nContent-Type: application/json\r\nContent-Length: 36\r\n\r\n{\"approved\":false,\"fraud_score\":0.6}",
       sizeof("HTTP/1.1 200 OK\r\nConnection: keep-alive\r\nContent-Type: application/json\r\nContent-Length: 36\r\n\r\n{\"approved\":false,\"fraud_score\":0.6}") - 1 },
     { "HTTP/1.1 200 OK\r\nConnection: keep-alive\r\nContent-Type: application/json\r\nContent-Length: 36\r\n\r\n{\"approved\":false,\"fraud_score\":0.8}",
@@ -400,29 +404,64 @@ static void vectorize_fast(const char *json, const char *end, int16_t out[DIMS])
     out[15] = 0;
 }
 
+static inline int16_t clamp_i16_i32(int32_t x) {
+    if (x > 32767) return 32767;
+    if (x < -32768) return -32768;
+    return (int16_t)x;
+}
+
+static inline void make_fast8_from_full16(const int16_t full[FULL_DIMS], int16_t fast[FAST_DIMS]) {
+    static const uint8_t dims[FAST_DIMS] = {2, 5, 6, 7, 8, 11, 12, 9};
+    static const int16_t w10[FAST_DIMS] = {20, 15, 13, 15, 18, 20, 15, 12};
+
+    for (int i = 0; i < FAST_DIMS; i++) {
+        int32_t v = (int32_t)full[dims[i]] * (int32_t)w10[i];
+        if (v >= 0) v = (v + 10) / 20;
+        else v = (v - 10) / 20;
+        fast[i] = clamp_i16_i32(v);
+    }
+}
+
+static inline uint32_t hsum4_epi32(__m128i v) {
+    v = _mm_hadd_epi32(v, v);
+    v = _mm_hadd_epi32(v, v);
+    return (uint32_t)_mm_cvtsi128_si32(v);
+}
+
+static inline uint64_t dist8_i16_sse(const int16_t *a, const int16_t *b) {
+    __m128i aa = _mm_load_si128((const __m128i *)a);
+    __m128i bb = _mm_load_si128((const __m128i *)b);
+    __m128i diff = _mm_sub_epi16(aa, bb);
+    __m128i sq = _mm_madd_epi16(diff, diff);
+    return hsum4_epi32(sq);
+}
+
 static inline uint64_t dist16_i16_avx2(const int16_t *a, const int16_t *b) {
     __m256i aa = _mm256_load_si256((const __m256i *)a);
     __m256i bb = _mm256_load_si256((const __m256i *)b);
     __m256i diff = _mm256_sub_epi16(aa, bb);
     __m256i sq = _mm256_madd_epi16(diff, diff);
 
-    int32_t lanes[8] __attribute__((aligned(32)));
-    _mm256_store_si256((__m256i *)lanes, sq);
-
-    uint64_t sum = 0;
-    sum += (uint32_t)lanes[0];
-    sum += (uint32_t)lanes[1];
-    sum += (uint32_t)lanes[2];
-    sum += (uint32_t)lanes[3];
-    sum += (uint32_t)lanes[4];
-    sum += (uint32_t)lanes[5];
-    sum += (uint32_t)lanes[6];
-    sum += (uint32_t)lanes[7];
-
-    return sum;
+    __m128i lo = _mm256_castsi256_si128(sq);
+    __m128i hi = _mm256_extracti128_si256(sq, 1);
+    __m128i sum = _mm_add_epi32(lo, hi);
+    return hsum4_epi32(sum);
 }
 
-static inline void consider_candidate(const int16_t q[DIMS], const int16_t *v, uint8_t label, uint64_t best_d[5], uint8_t best_l[5]) {
+static inline void consider_fast_candidate(uint64_t d, uint32_t idx, uint64_t best_d[TOP_CANDIDATES], uint32_t best_i[TOP_CANDIDATES]) {
+    if (d < best_d[TOP_CANDIDATES - 1]) {
+        int pos = TOP_CANDIDATES - 1;
+        while (pos > 0 && d < best_d[pos - 1]) {
+            best_d[pos] = best_d[pos - 1];
+            best_i[pos] = best_i[pos - 1];
+            pos--;
+        }
+        best_d[pos] = d;
+        best_i[pos] = idx;
+    }
+}
+
+static inline void consider_full_candidate(const int16_t q[FULL_DIMS], const int16_t *v, uint8_t label, uint64_t best_d[5], uint8_t best_l[5]) {
     uint64_t d = dist16_i16_avx2(q, v);
 
     if (d < best_d[4]) {
@@ -437,19 +476,38 @@ static inline void consider_candidate(const int16_t q[DIMS], const int16_t *v, u
     }
 }
 
-static int fraud_count_exact(const int16_t q[DIMS]) {
-    uint64_t best_d[5] = {
-        UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT64_MAX
-    };
-    uint8_t best_l[5] = {0, 0, 0, 0, 0};
+static int fraud_count_two_stage(const int16_t qfull[FULL_DIMS]) {
+    int16_t qfast[FAST_DIMS] __attribute__((aligned(16)));
+    make_fast8_from_full16(qfull, qfast);
 
-    const int16_t *vectors = g_vectors;
-    const uint8_t *labels = g_labels;
+    uint64_t cand_d[TOP_CANDIDATES];
+    uint32_t cand_i[TOP_CANDIDATES];
+
+    for (int i = 0; i < TOP_CANDIDATES; i++) {
+        cand_d[i] = UINT64_MAX;
+        cand_i[i] = UINT32_MAX;
+    }
+
+    const int16_t *fast_vectors = g_fast_vectors;
     uint32_t n = g_count;
 
     for (uint32_t i = 0; i < n; i++) {
-        const int16_t *v = vectors + ((size_t)i * DIMS);
-        consider_candidate(q, v, labels[i], best_d, best_l);
+        const int16_t *v = fast_vectors + ((size_t)i * FAST_DIMS);
+        uint64_t d = dist8_i16_sse(qfast, v);
+        consider_fast_candidate(d, i, cand_d, cand_i);
+    }
+
+    uint64_t best_d[5] = { UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT64_MAX };
+    uint8_t best_l[5] = {0, 0, 0, 0, 0};
+
+    const int16_t *full_vectors = g_full_vectors;
+    const uint8_t *labels = g_labels;
+
+    for (int k = 0; k < TOP_CANDIDATES; k++) {
+        uint32_t idx = cand_i[k];
+        if (idx == UINT32_MAX || idx >= n) break;
+        const int16_t *v = full_vectors + ((size_t)idx * FULL_DIMS);
+        consider_full_candidate(qfull, v, labels[idx], best_d, best_l);
     }
 
     return best_l[0] + best_l[1] + best_l[2] + best_l[3] + best_l[4];
@@ -485,33 +543,43 @@ static void load_index(const char *path) {
     }
 
     uint64_t magic;
-    uint32_t dims, vector_stride, vector_offset, label_offset;
+    uint32_t full_dims, fast_dims, full_stride, fast_stride, full_offset, fast_offset, label_offset;
 
     memcpy(&magic, map, 8);
     memcpy(&g_count, map + 8, 4);
-    memcpy(&dims, map + 12, 4);
-    memcpy(&vector_stride, map + 16, 4);
-    memcpy(&vector_offset, map + 20, 4);
-    memcpy(&label_offset, map + 24, 4);
+    memcpy(&full_dims, map + 12, 4);
+    memcpy(&fast_dims, map + 16, 4);
+    memcpy(&full_stride, map + 20, 4);
+    memcpy(&fast_stride, map + 24, 4);
+    memcpy(&full_offset, map + 28, 4);
+    memcpy(&fast_offset, map + 32, 4);
+    memcpy(&label_offset, map + 36, 4);
 
-    size_t vec_bytes = (size_t)g_count * DIMS * sizeof(int16_t);
+    size_t full_bytes = (size_t)g_count * FULL_DIMS * sizeof(int16_t);
+    size_t fast_bytes = (size_t)g_count * FAST_DIMS * sizeof(int16_t);
     size_t label_bytes = (size_t)g_count;
 
-    if (magic != MAGIC || dims != DIMS || vector_stride != DIMS * sizeof(int16_t) ||
-        vector_offset >= g_map_len || label_offset >= g_map_len ||
-        vector_offset + vec_bytes > g_map_len || label_offset + label_bytes > g_map_len ||
-        ((uintptr_t)(map + vector_offset) % 32) != 0) {
+    if (magic != MAGIC || full_dims != FULL_DIMS || fast_dims != FAST_DIMS ||
+        full_stride != FULL_DIMS * sizeof(int16_t) || fast_stride != FAST_DIMS * sizeof(int16_t) ||
+        full_offset >= g_map_len || fast_offset >= g_map_len || label_offset >= g_map_len ||
+        full_offset + full_bytes > g_map_len || fast_offset + fast_bytes > g_map_len ||
+        label_offset + label_bytes > g_map_len ||
+        ((uintptr_t)(map + full_offset) % 32) != 0 ||
+        ((uintptr_t)(map + fast_offset) % 16) != 0) {
         fprintf(stderr,
-                "bad index: magic=%llx count=%u dims=%u stride=%u voff=%u loff=%u len=%zu\n",
-                (unsigned long long)magic, g_count, dims, vector_stride, vector_offset, label_offset, g_map_len);
+                "bad index: magic=%llx count=%u full_dims=%u fast_dims=%u full_stride=%u fast_stride=%u full_off=%u fast_off=%u label_off=%u len=%zu\n",
+                (unsigned long long)magic, g_count, full_dims, fast_dims, full_stride, fast_stride,
+                full_offset, fast_offset, label_offset, g_map_len);
         exit(1);
     }
 
-    g_vectors = (int16_t *)(map + vector_offset);
+    g_full_vectors = (int16_t *)(map + full_offset);
+    g_fast_vectors = (int16_t *)(map + fast_offset);
     g_labels = (uint8_t *)(map + label_offset);
 
-    fprintf(stderr, "loaded exact-i16-packed-keepalive index: %u vectors, index=%zu bytes, vector_bytes=%zu, label_offset=%u\n",
-            g_count, g_map_len, vec_bytes, label_offset);
+    fprintf(stderr,
+            "loaded fast8-rerank64 index: %u vectors, index=%zu bytes, full_bytes=%zu, fast_bytes=%zu, label_offset=%u\n",
+            g_count, g_map_len, full_bytes, fast_bytes, label_offset);
 }
 
 static inline void send_static(int fd, StaticResp r) {
@@ -540,7 +608,7 @@ static int process_one_request(int fd, char *req, char *body, size_t body_len) {
     int16_t q[DIMS] __attribute__((aligned(32)));
     vectorize_fast(body, body + body_len, q);
 
-    int frauds = fraud_count_exact(q);
+    int frauds = fraud_count_two_stage(q);
     if (frauds < 0) frauds = 0;
     if (frauds > 5) frauds = 5;
 
@@ -712,7 +780,7 @@ int main(int argc, char **argv) {
     const char *sock_path = getenv("SOCKET_PATH");
     int fd = (sock_path && sock_path[0]) ? make_unix_socket(sock_path) : make_tcp_socket();
 
-    fprintf(stderr, "server ready, mode=exact-i16-packed-keepalive, refs=%u, threads=%d\n", g_count, threads);
+    fprintf(stderr, "server ready, mode=fast8-rerank64-keepalive, refs=%u, threads=%d\n", g_count, threads);
 
     pthread_t th[8];
 
