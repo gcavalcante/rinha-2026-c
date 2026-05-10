@@ -2,8 +2,15 @@ local headers = {}
 headers["Content-Type"] = "application/json"
 
 local payloads = {}
+
 for i = 1, 50 do
-  local f = io.open("payloads/payload-" .. i .. ".json", "rb")
+  local path = "payloads/payload-" .. i .. ".json"
+  local f, err = io.open(path, "rb")
+
+  if not f then
+    error("payload nao encontrado: " .. path .. " erro: " .. tostring(err))
+  end
+
   payloads[i] = f:read("*all")
   f:close()
 end

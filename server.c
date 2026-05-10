@@ -41,8 +41,8 @@ static uint8_t *g_labels;
 static size_t g_map_len;
 
 static const StaticResp READY_RESP = {
-    "HTTP/1.1 204 No Content\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
-    sizeof("HTTP/1.1 204 No Content\r\nConnection: close\r\nContent-Length: 0\r\n\r\n") - 1
+    "HTTP/1.1 204 No Content\r\nConnection: keep-alive\r\nContent-Length: 0\r\n\r\n",
+    sizeof("HTTP/1.1 204 No Content\r\nConnection: keep-alive\r\nContent-Length: 0\r\n\r\n") - 1
 };
 
 static const StaticResp NOT_FOUND_RESP = {
@@ -56,18 +56,18 @@ static const StaticResp BAD_RESP = {
 };
 
 static const StaticResp SCORE_RESP[6] = {
-    { "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: 35\r\n\r\n{\"approved\":true,\"fraud_score\":0.0}",
-      sizeof("HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: 35\r\n\r\n{\"approved\":true,\"fraud_score\":0.0}") - 1 },
-    { "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: 35\r\n\r\n{\"approved\":true,\"fraud_score\":0.2}",
-      sizeof("HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: 35\r\n\r\n{\"approved\":true,\"fraud_score\":0.2}") - 1 },
-    { "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: 35\r\n\r\n{\"approved\":true,\"fraud_score\":0.4}",
-      sizeof("HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: 35\r\n\r\n{\"approved\":true,\"fraud_score\":0.4}") - 1 },
-    { "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: 36\r\n\r\n{\"approved\":false,\"fraud_score\":0.6}",
-      sizeof("HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: 36\r\n\r\n{\"approved\":false,\"fraud_score\":0.6}") - 1 },
-    { "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: 36\r\n\r\n{\"approved\":false,\"fraud_score\":0.8}",
-      sizeof("HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: 36\r\n\r\n{\"approved\":false,\"fraud_score\":0.8}") - 1 },
-    { "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: 36\r\n\r\n{\"approved\":false,\"fraud_score\":1.0}",
-      sizeof("HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: 36\r\n\r\n{\"approved\":false,\"fraud_score\":1.0}") - 1 }
+    { "HTTP/1.1 200 OK\r\nConnection: keep-alive\r\nContent-Type: application/json\r\nContent-Length: 35\r\n\r\n{\"approved\":true,\"fraud_score\":0.0}",
+      sizeof("HTTP/1.1 200 OK\r\nConnection: keep-alive\r\nContent-Type: application/json\r\nContent-Length: 35\r\n\r\n{\"approved\":true,\"fraud_score\":0.0}") - 1 },
+    { "HTTP/1.1 200 OK\r\nConnection: keep-alive\r\nContent-Type: application/json\r\nContent-Length: 35\r\n\r\n{\"approved\":true,\"fraud_score\":0.2}",
+      sizeof("HTTP/1.1 200 OK\r\nConnection: keep-alive\r\nContent-Type: application/json\r\nContent-Length: 35\r\n\r\n{\"approved\":true,\"fraud_score\":0.2}") - 1 },
+    { "HTTP/1.1 200 OK\r\nConnection: keep-alive\r\nContent-Type: application/json\r\nContent-Length: 36\r\n\r\n{\"approved\":false,\"fraud_score\":0.4}",
+      sizeof("HTTP/1.1 200 OK\r\nConnection: keep-alive\r\nContent-Type: application/json\r\nContent-Length: 35\r\n\r\n{\"approved\":true,\"fraud_score\":0.4}") - 1 },
+    { "HTTP/1.1 200 OK\r\nConnection: keep-alive\r\nContent-Type: application/json\r\nContent-Length: 36\r\n\r\n{\"approved\":false,\"fraud_score\":0.6}",
+      sizeof("HTTP/1.1 200 OK\r\nConnection: keep-alive\r\nContent-Type: application/json\r\nContent-Length: 36\r\n\r\n{\"approved\":false,\"fraud_score\":0.6}") - 1 },
+    { "HTTP/1.1 200 OK\r\nConnection: keep-alive\r\nContent-Type: application/json\r\nContent-Length: 36\r\n\r\n{\"approved\":false,\"fraud_score\":0.8}",
+      sizeof("HTTP/1.1 200 OK\r\nConnection: keep-alive\r\nContent-Type: application/json\r\nContent-Length: 36\r\n\r\n{\"approved\":false,\"fraud_score\":0.8}") - 1 },
+    { "HTTP/1.1 200 OK\r\nConnection: keep-alive\r\nContent-Type: application/json\r\nContent-Length: 36\r\n\r\n{\"approved\":false,\"fraud_score\":1.0}",
+      sizeof("HTTP/1.1 200 OK\r\nConnection: keep-alive\r\nContent-Type: application/json\r\nContent-Length: 36\r\n\r\n{\"approved\":false,\"fraud_score\":1.0}") - 1 }
 };
 
 static const int16_t INSTALLMENTS_Q[13] = {
@@ -510,7 +510,7 @@ static void load_index(const char *path) {
     g_vectors = (int16_t *)(map + vector_offset);
     g_labels = (uint8_t *)(map + label_offset);
 
-    fprintf(stderr, "loaded exact-i16-packed index: %u vectors, index=%zu bytes, vector_bytes=%zu, label_offset=%u\n",
+    fprintf(stderr, "loaded exact-i16-packed-keepalive index: %u vectors, index=%zu bytes, vector_bytes=%zu, label_offset=%u\n",
             g_count, g_map_len, vec_bytes, label_offset);
 }
 
@@ -534,14 +534,13 @@ static int process_one_request(int fd, char *req, char *body, size_t body_len) {
 
     if (strncmp(req, "POST /fraud-score", 17)) {
         send_static(fd, NOT_FOUND_RESP);
-        return 0;
+        return 1;
     }
 
     int16_t q[DIMS] __attribute__((aligned(32)));
     vectorize_fast(body, body + body_len, q);
 
     int frauds = fraud_count_exact(q);
-
     if (frauds < 0) frauds = 0;
     if (frauds > 5) frauds = 5;
 
@@ -576,10 +575,20 @@ static void handle_client(int fd) {
             }
 
             if (used >= header_len + (size_t)content_len) {
-                buf[header_len + (size_t)content_len] = 0;
-                process_one_request(fd, buf, buf + header_len, (size_t)content_len);
-                close(fd);
-                return;
+                size_t req_len = header_len + (size_t)content_len;
+                buf[req_len] = 0;
+
+                int should_close = process_one_request(fd, buf, buf + header_len, (size_t)content_len);
+                if (should_close) {
+                    close(fd);
+                    return;
+                }
+
+                size_t remaining = used - req_len;
+                if (remaining > 0) memmove(buf, buf + req_len, remaining);
+                used = remaining;
+                if (used < REQ_MAX) buf[used] = 0;
+                continue;
             }
         }
 
@@ -703,7 +712,7 @@ int main(int argc, char **argv) {
     const char *sock_path = getenv("SOCKET_PATH");
     int fd = (sock_path && sock_path[0]) ? make_unix_socket(sock_path) : make_tcp_socket();
 
-    fprintf(stderr, "server ready, mode=exact-i16-packed, refs=%u, threads=%d\n", g_count, threads);
+    fprintf(stderr, "server ready, mode=exact-i16-packed-keepalive, refs=%u, threads=%d\n", g_count, threads);
 
     pthread_t th[8];
 

@@ -1,60 +1,59 @@
 services:
   lb:
-    image: haproxy:2.9-alpine
+    image: docker.io/library/haproxy:2.9-alpine
+    container_name: rinha-lb
     volumes:
       - ./haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
-      - sock:/run/sock
+      - ./sock:/run/sock
     ports:
       - "9999:9999"
     depends_on:
       - api1
       - api2
-    deploy:
-      resources:
-        limits:
-          cpus: "0.10"
-          memory: "30MB"
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
     networks:
       - rinha-net
 
   api1:
-    image: gdcavalcante/rinha-2026-c-exact-i16:35000
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        MAX_REFS: 50000
+    image: rinha-c-solution-exact-i16-packed-keepalive:latest
+    container_name: rinha-api1
     environment:
       - SOCKET_PATH=/run/sock/api1.sock
       - THREADS=1
     volumes:
-      - sock:/run/sock
-    deploy:
-      resources:
-        limits:
-          cpus: "0.45"
-          memory: "160MB"
+      - ./sock:/run/sock
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
     networks:
       - rinha-net
 
   api2:
-    image: seuusuario/rinha-2026-c-exact-i16:35000
+    image: rinha-c-solution-exact-i16-packed-keepalive:latest
+    container_name: rinha-api2
+    depends_on:
+      - api1
     environment:
       - SOCKET_PATH=/run/sock/api2.sock
       - THREADS=1
     volumes:
-      - sock:/run/sock
-    deploy:
-      resources:
-        limits:
-          cpus: "0.45"
-          memory: "160MB"
+      - ./sock:/run/sock
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
     networks:
       - rinha-net
 
 networks:
   rinha-net:
     driver: bridge
-
-volumes:
-  sock:
-    driver: local
-    driver_opts:
-      type: tmpfs
-      device: tmpfs
-      o: size=16m,mode=1777
