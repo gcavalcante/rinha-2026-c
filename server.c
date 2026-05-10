@@ -27,9 +27,12 @@
 
 #define DIMS 16
 #define FULL_DIMS 16
-#define FAST_DIMS 8
-#define TOP_CANDIDATES 64
-#define MAGIC 0x315346484E4952ULL /* RINHFS1 */
+#define BUCKET_BITS 11
+#define BUCKET_COUNT (1u << BUCKET_BITS)
+#define MIN_CANDIDATES 512
+#define MAX_CANDIDATES 8192
+#define MAX_BUCKET_RADIUS 10
+#define MAGIC 0x314B42484E4952ULL /* RINHBK1 */
 #define REQ_MAX 16384
 #define Q 8192
 
@@ -40,8 +43,8 @@ typedef struct {
 
 static uint32_t g_count;
 static int16_t *g_full_vectors;
-static int16_t *g_fast_vectors;
 static uint8_t *g_labels;
+static uint32_t *g_bucket_offsets;
 static size_t g_map_len;
 
 static const StaticResp READY_RESP = {
@@ -404,36 +407,10 @@ static void vectorize_fast(const char *json, const char *end, int16_t out[DIMS])
     out[15] = 0;
 }
 
-static inline int16_t clamp_i16_i32(int32_t x) {
-    if (x > 32767) return 32767;
-    if (x < -32768) return -32768;
-    return (int16_t)x;
-}
-
-static inline void make_fast8_from_full16(const int16_t full[FULL_DIMS], int16_t fast[FAST_DIMS]) {
-    static const uint8_t dims[FAST_DIMS] = {2, 5, 6, 7, 8, 11, 12, 9};
-    static const int16_t w10[FAST_DIMS] = {20, 15, 13, 15, 18, 20, 15, 12};
-
-    for (int i = 0; i < FAST_DIMS; i++) {
-        int32_t v = (int32_t)full[dims[i]] * (int32_t)w10[i];
-        if (v >= 0) v = (v + 10) / 20;
-        else v = (v - 10) / 20;
-        fast[i] = clamp_i16_i32(v);
-    }
-}
-
 static inline uint32_t hsum4_epi32(__m128i v) {
     v = _mm_hadd_epi32(v, v);
     v = _mm_hadd_epi32(v, v);
     return (uint32_t)_mm_cvtsi128_si32(v);
-}
-
-static inline uint64_t dist8_i16_sse(const int16_t *a, const int16_t *b) {
-    __m128i aa = _mm_load_si128((const __m128i *)a);
-    __m128i bb = _mm_load_si128((const __m128i *)b);
-    __m128i diff = _mm_sub_epi16(aa, bb);
-    __m128i sq = _mm_madd_epi16(diff, diff);
-    return hsum4_epi32(sq);
 }
 
 static inline uint64_t dist16_i16_avx2(const int16_t *a, const int16_t *b) {
@@ -448,69 +425,128 @@ static inline uint64_t dist16_i16_avx2(const int16_t *a, const int16_t *b) {
     return hsum4_epi32(sum);
 }
 
-static inline void consider_fast_candidate(uint64_t d, uint32_t idx, uint64_t best_d[TOP_CANDIDATES], uint32_t best_i[TOP_CANDIDATES]) {
-    if (d < best_d[TOP_CANDIDATES - 1]) {
-        int pos = TOP_CANDIDATES - 1;
-        while (pos > 0 && d < best_d[pos - 1]) {
-            best_d[pos] = best_d[pos - 1];
-            best_i[pos] = best_i[pos - 1];
-            pos--;
-        }
-        best_d[pos] = d;
-        best_i[pos] = idx;
-    }
+static inline uint16_t bucket4_nonneg(int16_t v, int16_t t1, int16_t t2, int16_t t3) {
+    if (v < 0) v = 0;
+    if (v <= t1) return 0;
+    if (v <= t2) return 1;
+    if (v <= t3) return 2;
+    return 3;
 }
 
-static inline void consider_full_candidate(const int16_t q[FULL_DIMS], const int16_t *v, uint8_t label, uint64_t best_d[5], uint8_t best_l[5]) {
+static inline uint16_t bucket_key_from_full16(const int16_t full[FULL_DIMS]) {
+    uint16_t amount = bucket4_nonneg(full[2], 819, 2048, 4096);   /* amount/customer_avg normalized */
+    uint16_t kmhome = bucket4_nonneg(full[7], 410, 1638, 4096);   /* km_from_home */
+    uint16_t tx24   = bucket4_nonneg(full[8], 819, 2048, 4096);   /* tx_count_24h */
+    uint16_t mcc    = bucket4_nonneg(full[12], 2048, 4096, 6144); /* mcc risk */
+    uint16_t card   = full[10] > (Q / 2);                         /* card_present */
+    uint16_t unk    = full[11] > (Q / 2);                         /* unknown_merchant */
+    uint16_t online = full[9]  > (Q / 2);                         /* is_online */
+
+    return (uint16_t)((amount << 9) | (kmhome << 7) | (tx24 << 5) | (mcc << 3) |
+                      (card << 2) | (unk << 1) | online);
+}
+
+static inline uint32_t absdiff_u32(uint32_t a, uint32_t b) {
+    return a > b ? a - b : b - a;
+}
+
+static inline uint32_t bucket_key_distance(uint16_t a, uint16_t b) {
+    uint32_t da = (a >> 9) & 3, db = (b >> 9) & 3;
+    uint32_t ka = (a >> 7) & 3, kb = (b >> 7) & 3;
+    uint32_t ta = (a >> 5) & 3, tb = (b >> 5) & 3;
+    uint32_t ma = (a >> 3) & 3, mb = (b >> 3) & 3;
+
+    uint32_t d = 0;
+    d += absdiff_u32(da, db); /* amount_vs_avg bucket */
+    d += absdiff_u32(ka, kb); /* km_from_home bucket */
+    d += absdiff_u32(ta, tb); /* tx_count_24h bucket */
+    d += absdiff_u32(ma, mb); /* mcc bucket */
+    d += ((a ^ b) & 0x1) ? 1 : 0; /* is_online */
+    d += ((a ^ b) & 0x2) ? 1 : 0; /* unknown_merchant */
+    d += ((a ^ b) & 0x4) ? 1 : 0; /* card_present */
+    return d;
+}
+
+typedef struct {
+    uint64_t best_d[5];
+    uint8_t best_l[5];
+    uint32_t scanned;
+} SearchState;
+
+static inline void consider_full_candidate(const int16_t q[FULL_DIMS], const int16_t *v, uint8_t label, SearchState *st) {
     uint64_t d = dist16_i16_avx2(q, v);
 
-    if (d < best_d[4]) {
+    if (d < st->best_d[4]) {
         int pos = 4;
-        while (pos > 0 && d < best_d[pos - 1]) {
-            best_d[pos] = best_d[pos - 1];
-            best_l[pos] = best_l[pos - 1];
+        while (pos > 0 && d < st->best_d[pos - 1]) {
+            st->best_d[pos] = st->best_d[pos - 1];
+            st->best_l[pos] = st->best_l[pos - 1];
             pos--;
         }
-        best_d[pos] = d;
-        best_l[pos] = label;
+        st->best_d[pos] = d;
+        st->best_l[pos] = label;
     }
 }
 
-static int fraud_count_two_stage(const int16_t qfull[FULL_DIMS]) {
-    int16_t qfast[FAST_DIMS] __attribute__((aligned(16)));
-    make_fast8_from_full16(qfull, qfast);
+static inline void scan_bucket(uint16_t bucket, const int16_t q[FULL_DIMS], SearchState *st) {
+    if (bucket >= BUCKET_COUNT || st->scanned >= MAX_CANDIDATES) return;
 
-    uint64_t cand_d[TOP_CANDIDATES];
-    uint32_t cand_i[TOP_CANDIDATES];
+    uint32_t start = g_bucket_offsets[bucket];
+    uint32_t end = g_bucket_offsets[bucket + 1];
+    if (end <= start) return;
 
-    for (int i = 0; i < TOP_CANDIDATES; i++) {
-        cand_d[i] = UINT64_MAX;
-        cand_i[i] = UINT32_MAX;
+    uint32_t n = end - start;
+    uint32_t remaining = MAX_CANDIDATES - st->scanned;
+    uint32_t step = 1;
+
+    if (n > remaining && remaining > 0) {
+        step = (n + remaining - 1) / remaining;
+        if (step < 1) step = 1;
     }
 
-    const int16_t *fast_vectors = g_fast_vectors;
-    uint32_t n = g_count;
-
-    for (uint32_t i = 0; i < n; i++) {
-        const int16_t *v = fast_vectors + ((size_t)i * FAST_DIMS);
-        uint64_t d = dist8_i16_sse(qfast, v);
-        consider_fast_candidate(d, i, cand_d, cand_i);
-    }
-
-    uint64_t best_d[5] = { UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT64_MAX };
-    uint8_t best_l[5] = {0, 0, 0, 0, 0};
-
-    const int16_t *full_vectors = g_full_vectors;
+    const int16_t *vectors = g_full_vectors;
     const uint8_t *labels = g_labels;
 
-    for (int k = 0; k < TOP_CANDIDATES; k++) {
-        uint32_t idx = cand_i[k];
-        if (idx == UINT32_MAX || idx >= n) break;
-        const int16_t *v = full_vectors + ((size_t)idx * FULL_DIMS);
-        consider_full_candidate(qfull, v, labels[idx], best_d, best_l);
+    for (uint32_t i = start; i < end && st->scanned < MAX_CANDIDATES; i += step) {
+        const int16_t *v = vectors + ((size_t)i * FULL_DIMS);
+        consider_full_candidate(q, v, labels[i], st);
+        st->scanned++;
+    }
+}
+
+static int fraud_count_bucket(const int16_t qfull[FULL_DIMS]) {
+    SearchState st;
+    st.best_d[0] = UINT64_MAX;
+    st.best_d[1] = UINT64_MAX;
+    st.best_d[2] = UINT64_MAX;
+    st.best_d[3] = UINT64_MAX;
+    st.best_d[4] = UINT64_MAX;
+    st.best_l[0] = st.best_l[1] = st.best_l[2] = st.best_l[3] = st.best_l[4] = 0;
+    st.scanned = 0;
+
+    uint16_t qbucket = bucket_key_from_full16(qfull);
+
+    for (uint32_t radius = 0; radius <= MAX_BUCKET_RADIUS && st.scanned < MAX_CANDIDATES; radius++) {
+        for (uint32_t b = 0; b < BUCKET_COUNT && st.scanned < MAX_CANDIDATES; b++) {
+            if (bucket_key_distance(qbucket, (uint16_t)b) == radius) {
+                scan_bucket((uint16_t)b, qfull, &st);
+            }
+        }
+
+        if (st.scanned >= MIN_CANDIDATES && radius >= 1) break;
     }
 
-    return best_l[0] + best_l[1] + best_l[2] + best_l[3] + best_l[4];
+    /* Very sparse bucket safety net: scan non-empty buckets until we have at least top5 candidates. */
+    if (st.scanned < 5) {
+        for (uint32_t b = 0; b < BUCKET_COUNT && st.scanned < MAX_CANDIDATES; b++) {
+            if (g_bucket_offsets[b + 1] > g_bucket_offsets[b]) {
+                scan_bucket((uint16_t)b, qfull, &st);
+                if (st.scanned >= MIN_CANDIDATES) break;
+            }
+        }
+    }
+
+    return st.best_l[0] + st.best_l[1] + st.best_l[2] + st.best_l[3] + st.best_l[4];
 }
 
 static void load_index(const char *path) {
@@ -543,43 +579,47 @@ static void load_index(const char *path) {
     }
 
     uint64_t magic;
-    uint32_t full_dims, fast_dims, full_stride, fast_stride, full_offset, fast_offset, label_offset;
+    uint32_t dims, bucket_count, vector_stride, vector_offset, label_offset, bucket_offset_offset;
 
     memcpy(&magic, map, 8);
     memcpy(&g_count, map + 8, 4);
-    memcpy(&full_dims, map + 12, 4);
-    memcpy(&fast_dims, map + 16, 4);
-    memcpy(&full_stride, map + 20, 4);
-    memcpy(&fast_stride, map + 24, 4);
-    memcpy(&full_offset, map + 28, 4);
-    memcpy(&fast_offset, map + 32, 4);
-    memcpy(&label_offset, map + 36, 4);
+    memcpy(&dims, map + 12, 4);
+    memcpy(&bucket_count, map + 16, 4);
+    memcpy(&vector_stride, map + 20, 4);
+    memcpy(&vector_offset, map + 24, 4);
+    memcpy(&label_offset, map + 28, 4);
+    memcpy(&bucket_offset_offset, map + 32, 4);
 
-    size_t full_bytes = (size_t)g_count * FULL_DIMS * sizeof(int16_t);
-    size_t fast_bytes = (size_t)g_count * FAST_DIMS * sizeof(int16_t);
+    size_t vector_bytes = (size_t)g_count * FULL_DIMS * sizeof(int16_t);
     size_t label_bytes = (size_t)g_count;
+    size_t bucket_bytes = (size_t)(BUCKET_COUNT + 1) * sizeof(uint32_t);
 
-    if (magic != MAGIC || full_dims != FULL_DIMS || fast_dims != FAST_DIMS ||
-        full_stride != FULL_DIMS * sizeof(int16_t) || fast_stride != FAST_DIMS * sizeof(int16_t) ||
-        full_offset >= g_map_len || fast_offset >= g_map_len || label_offset >= g_map_len ||
-        full_offset + full_bytes > g_map_len || fast_offset + fast_bytes > g_map_len ||
-        label_offset + label_bytes > g_map_len ||
-        ((uintptr_t)(map + full_offset) % 32) != 0 ||
-        ((uintptr_t)(map + fast_offset) % 16) != 0) {
+    if (magic != MAGIC || dims != FULL_DIMS || bucket_count != BUCKET_COUNT ||
+        vector_stride != FULL_DIMS * sizeof(int16_t) ||
+        vector_offset >= g_map_len || label_offset >= g_map_len || bucket_offset_offset >= g_map_len ||
+        vector_offset + vector_bytes > g_map_len || label_offset + label_bytes > g_map_len ||
+        bucket_offset_offset + bucket_bytes > g_map_len ||
+        ((uintptr_t)(map + vector_offset) % 32) != 0 ||
+        ((uintptr_t)(map + bucket_offset_offset) % 4) != 0) {
         fprintf(stderr,
-                "bad index: magic=%llx count=%u full_dims=%u fast_dims=%u full_stride=%u fast_stride=%u full_off=%u fast_off=%u label_off=%u len=%zu\n",
-                (unsigned long long)magic, g_count, full_dims, fast_dims, full_stride, fast_stride,
-                full_offset, fast_offset, label_offset, g_map_len);
+                "bad bucket index: magic=%llx count=%u dims=%u buckets=%u stride=%u vec_off=%u label_off=%u bucket_off=%u len=%zu\n",
+                (unsigned long long)magic, g_count, dims, bucket_count, vector_stride,
+                vector_offset, label_offset, bucket_offset_offset, g_map_len);
         exit(1);
     }
 
-    g_full_vectors = (int16_t *)(map + full_offset);
-    g_fast_vectors = (int16_t *)(map + fast_offset);
+    g_full_vectors = (int16_t *)(map + vector_offset);
     g_labels = (uint8_t *)(map + label_offset);
+    g_bucket_offsets = (uint32_t *)(map + bucket_offset_offset);
+
+    if (g_bucket_offsets[0] != 0 || g_bucket_offsets[BUCKET_COUNT] != g_count) {
+        fprintf(stderr, "bad bucket offsets: first=%u last=%u count=%u\n", g_bucket_offsets[0], g_bucket_offsets[BUCKET_COUNT], g_count);
+        exit(1);
+    }
 
     fprintf(stderr,
-            "loaded fast8-rerank64 index: %u vectors, index=%zu bytes, full_bytes=%zu, fast_bytes=%zu, label_offset=%u\n",
-            g_count, g_map_len, full_bytes, fast_bytes, label_offset);
+            "loaded bucket-exact16 index: %u vectors, index=%zu bytes, vector_bytes=%zu, label_offset=%u, bucket_offset=%u, max_candidates=%u\n",
+            g_count, g_map_len, vector_bytes, label_offset, bucket_offset_offset, MAX_CANDIDATES);
 }
 
 static inline void send_static(int fd, StaticResp r) {
@@ -608,7 +648,7 @@ static int process_one_request(int fd, char *req, char *body, size_t body_len) {
     int16_t q[DIMS] __attribute__((aligned(32)));
     vectorize_fast(body, body + body_len, q);
 
-    int frauds = fraud_count_two_stage(q);
+    int frauds = fraud_count_bucket(q);
     if (frauds < 0) frauds = 0;
     if (frauds > 5) frauds = 5;
 
@@ -780,7 +820,7 @@ int main(int argc, char **argv) {
     const char *sock_path = getenv("SOCKET_PATH");
     int fd = (sock_path && sock_path[0]) ? make_unix_socket(sock_path) : make_tcp_socket();
 
-    fprintf(stderr, "server ready, mode=fast8-rerank64-keepalive, refs=%u, threads=%d\n", g_count, threads);
+    fprintf(stderr, "server ready, mode=bucket-exact16-keepalive, refs=%u, threads=%d\n", g_count, threads);
 
     pthread_t th[8];
 
