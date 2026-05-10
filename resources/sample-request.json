@@ -1,0 +1,28 @@
+{
+  "transaction": {
+    "id": "tx-test-001",
+    "requested_at": "2026-01-10T19:30:00Z",
+    "amount": 123.45,
+    "installments": 1
+  },
+  "customer": {
+    "id": "cust-001",
+    "avg_amount": 100.0,
+    "tx_count_24h": 2,
+    "known_merchants": ["m-001", "m-002"]
+  },
+  "merchant": {
+    "id": "m-003",
+    "mcc": "5411",
+    "avg_amount": 90.0
+  },
+  "terminal": {
+    "is_online": true,
+    "card_present": false,
+    "km_from_home": 15.0
+  },
+  "last_transaction": {
+    "timestamp": "2026-01-10T18:00:00Z",
+    "km_from_current": 2.0
+  }
+}

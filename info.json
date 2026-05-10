@@ -1,0 +1,7 @@
+{
+  "participants": ["Gabriel Cavalcante"],
+  "social": ["https://github.com/gdcavalcante"],
+  "source-code-repo": "https://github.com/gdcavalcante/rinha-2026-c",
+  "stack": ["c", "haproxy", "avx2", "unix-domain-socket", "docker"],
+  "open_to_work": false
+}
