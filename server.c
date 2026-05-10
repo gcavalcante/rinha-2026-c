@@ -26,13 +26,7 @@
 #endif
 
 #define DIMS 16
-#define FULL_DIMS 16
-#define BUCKET_BITS 11
-#define BUCKET_COUNT (1u << BUCKET_BITS)
-#define MIN_CANDIDATES 256
-#define MAX_CANDIDATES 2048
-#define MAX_BUCKET_RADIUS 4
-#define MAGIC 0x314B42484E4952ULL /* RINHBK1 */
+#define MAGIC 0x52494E4849504B31ULL /* RINHIPK1 */
 #define REQ_MAX 16384
 #define Q 8192
 
@@ -42,16 +36,13 @@ typedef struct {
 } StaticResp;
 
 static uint32_t g_count;
-static int16_t *g_full_vectors;
+static int16_t *g_vectors;
 static uint8_t *g_labels;
-static uint32_t *g_bucket_offsets;
-static uint16_t g_bucket_neighbors[BUCKET_COUNT][BUCKET_COUNT];
-static uint16_t g_bucket_radius_end[BUCKET_COUNT][MAX_BUCKET_RADIUS + 1];
 static size_t g_map_len;
 
 static const StaticResp READY_RESP = {
-    "HTTP/1.1 204 No Content\r\nConnection: keep-alive\r\nContent-Length: 0\r\n\r\n",
-    sizeof("HTTP/1.1 204 No Content\r\nConnection: keep-alive\r\nContent-Length: 0\r\n\r\n") - 1
+    "HTTP/1.1 204 No Content\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
+    sizeof("HTTP/1.1 204 No Content\r\nConnection: close\r\nContent-Length: 0\r\n\r\n") - 1
 };
 
 static const StaticResp NOT_FOUND_RESP = {
@@ -65,18 +56,18 @@ static const StaticResp BAD_RESP = {
 };
 
 static const StaticResp SCORE_RESP[6] = {
-    { "HTTP/1.1 200 OK\r\nConnection: keep-alive\r\nContent-Type: application/json\r\nContent-Length: 35\r\n\r\n{\"approved\":true,\"fraud_score\":0.0}",
-      sizeof("HTTP/1.1 200 OK\r\nConnection: keep-alive\r\nContent-Type: application/json\r\nContent-Length: 35\r\n\r\n{\"approved\":true,\"fraud_score\":0.0}") - 1 },
-    { "HTTP/1.1 200 OK\r\nConnection: keep-alive\r\nContent-Type: application/json\r\nContent-Length: 35\r\n\r\n{\"approved\":true,\"fraud_score\":0.2}",
-      sizeof("HTTP/1.1 200 OK\r\nConnection: keep-alive\r\nContent-Type: application/json\r\nContent-Length: 35\r\n\r\n{\"approved\":true,\"fraud_score\":0.2}") - 1 },
-    { "HTTP/1.1 200 OK\r\nConnection: keep-alive\r\nContent-Type: application/json\r\nContent-Length: 36\r\n\r\n{\"approved\":false,\"fraud_score\":0.4}",
-      sizeof("HTTP/1.1 200 OK\r\nConnection: keep-alive\r\nContent-Type: application/json\r\nContent-Length: 36\r\n\r\n{\"approved\":false,\"fraud_score\":0.4}") - 1 },
-    { "HTTP/1.1 200 OK\r\nConnection: keep-alive\r\nContent-Type: application/json\r\nContent-Length: 36\r\n\r\n{\"approved\":false,\"fraud_score\":0.6}",
-      sizeof("HTTP/1.1 200 OK\r\nConnection: keep-alive\r\nContent-Type: application/json\r\nContent-Length: 36\r\n\r\n{\"approved\":false,\"fraud_score\":0.6}") - 1 },
-    { "HTTP/1.1 200 OK\r\nConnection: keep-alive\r\nContent-Type: application/json\r\nContent-Length: 36\r\n\r\n{\"approved\":false,\"fraud_score\":0.8}",
-      sizeof("HTTP/1.1 200 OK\r\nConnection: keep-alive\r\nContent-Type: application/json\r\nContent-Length: 36\r\n\r\n{\"approved\":false,\"fraud_score\":0.8}") - 1 },
-    { "HTTP/1.1 200 OK\r\nConnection: keep-alive\r\nContent-Type: application/json\r\nContent-Length: 36\r\n\r\n{\"approved\":false,\"fraud_score\":1.0}",
-      sizeof("HTTP/1.1 200 OK\r\nConnection: keep-alive\r\nContent-Type: application/json\r\nContent-Length: 36\r\n\r\n{\"approved\":false,\"fraud_score\":1.0}") - 1 }
+    { "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: 35\r\n\r\n{\"approved\":true,\"fraud_score\":0.0}",
+      sizeof("HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: 35\r\n\r\n{\"approved\":true,\"fraud_score\":0.0}") - 1 },
+    { "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: 35\r\n\r\n{\"approved\":true,\"fraud_score\":0.2}",
+      sizeof("HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: 35\r\n\r\n{\"approved\":true,\"fraud_score\":0.2}") - 1 },
+    { "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: 35\r\n\r\n{\"approved\":true,\"fraud_score\":0.4}",
+      sizeof("HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: 35\r\n\r\n{\"approved\":true,\"fraud_score\":0.4}") - 1 },
+    { "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: 36\r\n\r\n{\"approved\":false,\"fraud_score\":0.6}",
+      sizeof("HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: 36\r\n\r\n{\"approved\":false,\"fraud_score\":0.6}") - 1 },
+    { "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: 36\r\n\r\n{\"approved\":false,\"fraud_score\":0.8}",
+      sizeof("HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: 36\r\n\r\n{\"approved\":false,\"fraud_score\":0.8}") - 1 },
+    { "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: 36\r\n\r\n{\"approved\":false,\"fraud_score\":1.0}",
+      sizeof("HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: 36\r\n\r\n{\"approved\":false,\"fraud_score\":1.0}") - 1 }
 };
 
 static const int16_t INSTALLMENTS_Q[13] = {
@@ -409,164 +400,59 @@ static void vectorize_fast(const char *json, const char *end, int16_t out[DIMS])
     out[15] = 0;
 }
 
-static inline uint32_t hsum4_epi32(__m128i v) {
-    v = _mm_hadd_epi32(v, v);
-    v = _mm_hadd_epi32(v, v);
-    return (uint32_t)_mm_cvtsi128_si32(v);
-}
-
 static inline uint64_t dist16_i16_avx2(const int16_t *a, const int16_t *b) {
     __m256i aa = _mm256_load_si256((const __m256i *)a);
     __m256i bb = _mm256_load_si256((const __m256i *)b);
     __m256i diff = _mm256_sub_epi16(aa, bb);
     __m256i sq = _mm256_madd_epi16(diff, diff);
 
-    __m128i lo = _mm256_castsi256_si128(sq);
-    __m128i hi = _mm256_extracti128_si256(sq, 1);
-    __m128i sum = _mm_add_epi32(lo, hi);
-    return hsum4_epi32(sum);
+    int32_t lanes[8] __attribute__((aligned(32)));
+    _mm256_store_si256((__m256i *)lanes, sq);
+
+    uint64_t sum = 0;
+    sum += (uint32_t)lanes[0];
+    sum += (uint32_t)lanes[1];
+    sum += (uint32_t)lanes[2];
+    sum += (uint32_t)lanes[3];
+    sum += (uint32_t)lanes[4];
+    sum += (uint32_t)lanes[5];
+    sum += (uint32_t)lanes[6];
+    sum += (uint32_t)lanes[7];
+
+    return sum;
 }
 
-static inline uint16_t bucket4_nonneg(int16_t v, int16_t t1, int16_t t2, int16_t t3) {
-    if (v < 0) v = 0;
-    if (v <= t1) return 0;
-    if (v <= t2) return 1;
-    if (v <= t3) return 2;
-    return 3;
-}
-
-static inline uint16_t bucket_key_from_full16(const int16_t full[FULL_DIMS]) {
-    uint16_t amount = bucket4_nonneg(full[2], 819, 2048, 4096);   /* amount/customer_avg normalized */
-    uint16_t kmhome = bucket4_nonneg(full[7], 410, 1638, 4096);   /* km_from_home */
-    uint16_t tx24   = bucket4_nonneg(full[8], 819, 2048, 4096);   /* tx_count_24h */
-    uint16_t mcc    = bucket4_nonneg(full[12], 2048, 4096, 6144); /* mcc risk */
-    uint16_t card   = full[10] > (Q / 2);                         /* card_present */
-    uint16_t unk    = full[11] > (Q / 2);                         /* unknown_merchant */
-    uint16_t online = full[9]  > (Q / 2);                         /* is_online */
-
-    return (uint16_t)((amount << 9) | (kmhome << 7) | (tx24 << 5) | (mcc << 3) |
-                      (card << 2) | (unk << 1) | online);
-}
-
-static inline uint32_t absdiff_u32(uint32_t a, uint32_t b) {
-    return a > b ? a - b : b - a;
-}
-
-static inline uint32_t bucket_key_distance(uint16_t a, uint16_t b) {
-    uint32_t da = (a >> 9) & 3, db = (b >> 9) & 3;
-    uint32_t ka = (a >> 7) & 3, kb = (b >> 7) & 3;
-    uint32_t ta = (a >> 5) & 3, tb = (b >> 5) & 3;
-    uint32_t ma = (a >> 3) & 3, mb = (b >> 3) & 3;
-
-    uint32_t d = 0;
-    d += absdiff_u32(da, db); /* amount_vs_avg bucket */
-    d += absdiff_u32(ka, kb); /* km_from_home bucket */
-    d += absdiff_u32(ta, tb); /* tx_count_24h bucket */
-    d += absdiff_u32(ma, mb); /* mcc bucket */
-    d += ((a ^ b) & 0x1) ? 1 : 0; /* is_online */
-    d += ((a ^ b) & 0x2) ? 1 : 0; /* unknown_merchant */
-    d += ((a ^ b) & 0x4) ? 1 : 0; /* card_present */
-    return d;
-}
-
-static void precompute_bucket_neighbors(void) {
-    for (uint32_t q = 0; q < BUCKET_COUNT; q++) {
-        uint32_t pos = 0;
-
-        for (uint32_t radius = 0; radius <= MAX_BUCKET_RADIUS; radius++) {
-            for (uint32_t b = 0; b < BUCKET_COUNT; b++) {
-                if (bucket_key_distance((uint16_t)q, (uint16_t)b) == radius) {
-                    g_bucket_neighbors[q][pos++] = (uint16_t)b;
-                }
-            }
-            g_bucket_radius_end[q][radius] = (uint16_t)pos;
-        }
-    }
-}
-
-
-typedef struct {
-    uint64_t best_d[5];
-    uint8_t best_l[5];
-    uint32_t scanned;
-} SearchState;
-
-static inline void consider_full_candidate(const int16_t q[FULL_DIMS], const int16_t *v, uint8_t label, SearchState *st) {
+static inline void consider_candidate(const int16_t q[DIMS], const int16_t *v, uint8_t label, uint64_t best_d[5], uint8_t best_l[5]) {
     uint64_t d = dist16_i16_avx2(q, v);
 
-    if (d < st->best_d[4]) {
+    if (d < best_d[4]) {
         int pos = 4;
-        while (pos > 0 && d < st->best_d[pos - 1]) {
-            st->best_d[pos] = st->best_d[pos - 1];
-            st->best_l[pos] = st->best_l[pos - 1];
+        while (pos > 0 && d < best_d[pos - 1]) {
+            best_d[pos] = best_d[pos - 1];
+            best_l[pos] = best_l[pos - 1];
             pos--;
         }
-        st->best_d[pos] = d;
-        st->best_l[pos] = label;
+        best_d[pos] = d;
+        best_l[pos] = label;
     }
 }
 
-static inline void scan_bucket(uint16_t bucket, const int16_t q[FULL_DIMS], SearchState *st) {
-    if (bucket >= BUCKET_COUNT || st->scanned >= MAX_CANDIDATES) return;
+static int fraud_count_exact(const int16_t q[DIMS]) {
+    uint64_t best_d[5] = {
+        UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT64_MAX
+    };
+    uint8_t best_l[5] = {0, 0, 0, 0, 0};
 
-    uint32_t start = g_bucket_offsets[bucket];
-    uint32_t end = g_bucket_offsets[bucket + 1];
-    if (end <= start) return;
-
-    uint32_t n = end - start;
-    uint32_t remaining = MAX_CANDIDATES - st->scanned;
-    uint32_t step = 1;
-
-    if (n > remaining && remaining > 0) {
-        step = (n + remaining - 1) / remaining;
-        if (step < 1) step = 1;
-    }
-
-    const int16_t *vectors = g_full_vectors;
+    const int16_t *vectors = g_vectors;
     const uint8_t *labels = g_labels;
+    uint32_t n = g_count;
 
-    for (uint32_t i = start; i < end && st->scanned < MAX_CANDIDATES; i += step) {
-        const int16_t *v = vectors + ((size_t)i * FULL_DIMS);
-        consider_full_candidate(q, v, labels[i], st);
-        st->scanned++;
-    }
-}
-
-static int fraud_count_bucket(const int16_t qfull[FULL_DIMS]) {
-    SearchState st;
-    st.best_d[0] = UINT64_MAX;
-    st.best_d[1] = UINT64_MAX;
-    st.best_d[2] = UINT64_MAX;
-    st.best_d[3] = UINT64_MAX;
-    st.best_d[4] = UINT64_MAX;
-    st.best_l[0] = st.best_l[1] = st.best_l[2] = st.best_l[3] = st.best_l[4] = 0;
-    st.scanned = 0;
-
-    uint16_t qbucket = bucket_key_from_full16(qfull);
-
-    uint32_t neighbor_pos = 0;
-
-    for (uint32_t radius = 0; radius <= MAX_BUCKET_RADIUS && st.scanned < MAX_CANDIDATES; radius++) {
-        uint32_t end = g_bucket_radius_end[qbucket][radius];
-
-        for (; neighbor_pos < end && st.scanned < MAX_CANDIDATES; neighbor_pos++) {
-            scan_bucket(g_bucket_neighbors[qbucket][neighbor_pos], qfull, &st);
-        }
-
-        if (st.scanned >= MIN_CANDIDATES && radius >= 1) break;
+    for (uint32_t i = 0; i < n; i++) {
+        const int16_t *v = vectors + ((size_t)i * DIMS);
+        consider_candidate(q, v, labels[i], best_d, best_l);
     }
 
-    /* Very sparse bucket safety net: scan non-empty buckets until we have at least top5 candidates. */
-    if (st.scanned < 5) {
-        for (uint32_t b = 0; b < BUCKET_COUNT && st.scanned < MAX_CANDIDATES; b++) {
-            if (g_bucket_offsets[b + 1] > g_bucket_offsets[b]) {
-                scan_bucket((uint16_t)b, qfull, &st);
-                if (st.scanned >= MIN_CANDIDATES) break;
-            }
-        }
-    }
-
-    return st.best_l[0] + st.best_l[1] + st.best_l[2] + st.best_l[3] + st.best_l[4];
+    return best_l[0] + best_l[1] + best_l[2] + best_l[3] + best_l[4];
 }
 
 static void load_index(const char *path) {
@@ -599,49 +485,33 @@ static void load_index(const char *path) {
     }
 
     uint64_t magic;
-    uint32_t dims, bucket_count, vector_stride, vector_offset, label_offset, bucket_offset_offset;
+    uint32_t dims, vector_stride, vector_offset, label_offset;
 
     memcpy(&magic, map, 8);
     memcpy(&g_count, map + 8, 4);
     memcpy(&dims, map + 12, 4);
-    memcpy(&bucket_count, map + 16, 4);
-    memcpy(&vector_stride, map + 20, 4);
-    memcpy(&vector_offset, map + 24, 4);
-    memcpy(&label_offset, map + 28, 4);
-    memcpy(&bucket_offset_offset, map + 32, 4);
+    memcpy(&vector_stride, map + 16, 4);
+    memcpy(&vector_offset, map + 20, 4);
+    memcpy(&label_offset, map + 24, 4);
 
-    size_t vector_bytes = (size_t)g_count * FULL_DIMS * sizeof(int16_t);
+    size_t vec_bytes = (size_t)g_count * DIMS * sizeof(int16_t);
     size_t label_bytes = (size_t)g_count;
-    size_t bucket_bytes = (size_t)(BUCKET_COUNT + 1) * sizeof(uint32_t);
 
-    if (magic != MAGIC || dims != FULL_DIMS || bucket_count != BUCKET_COUNT ||
-        vector_stride != FULL_DIMS * sizeof(int16_t) ||
-        vector_offset >= g_map_len || label_offset >= g_map_len || bucket_offset_offset >= g_map_len ||
-        vector_offset + vector_bytes > g_map_len || label_offset + label_bytes > g_map_len ||
-        bucket_offset_offset + bucket_bytes > g_map_len ||
-        ((uintptr_t)(map + vector_offset) % 32) != 0 ||
-        ((uintptr_t)(map + bucket_offset_offset) % 4) != 0) {
+    if (magic != MAGIC || dims != DIMS || vector_stride != DIMS * sizeof(int16_t) ||
+        vector_offset >= g_map_len || label_offset >= g_map_len ||
+        vector_offset + vec_bytes > g_map_len || label_offset + label_bytes > g_map_len ||
+        ((uintptr_t)(map + vector_offset) % 32) != 0) {
         fprintf(stderr,
-                "bad bucket index: magic=%llx count=%u dims=%u buckets=%u stride=%u vec_off=%u label_off=%u bucket_off=%u len=%zu\n",
-                (unsigned long long)magic, g_count, dims, bucket_count, vector_stride,
-                vector_offset, label_offset, bucket_offset_offset, g_map_len);
+                "bad index: magic=%llx count=%u dims=%u stride=%u voff=%u loff=%u len=%zu\n",
+                (unsigned long long)magic, g_count, dims, vector_stride, vector_offset, label_offset, g_map_len);
         exit(1);
     }
 
-    g_full_vectors = (int16_t *)(map + vector_offset);
+    g_vectors = (int16_t *)(map + vector_offset);
     g_labels = (uint8_t *)(map + label_offset);
-    g_bucket_offsets = (uint32_t *)(map + bucket_offset_offset);
 
-    if (g_bucket_offsets[0] != 0 || g_bucket_offsets[BUCKET_COUNT] != g_count) {
-        fprintf(stderr, "bad bucket offsets: first=%u last=%u count=%u\n", g_bucket_offsets[0], g_bucket_offsets[BUCKET_COUNT], g_count);
-        exit(1);
-    }
-
-    precompute_bucket_neighbors();
-
-    fprintf(stderr,
-            "loaded bucket-exact16-neighbors index: %u vectors, index=%zu bytes, vector_bytes=%zu, label_offset=%u, bucket_offset=%u, max_candidates=%u\n",
-            g_count, g_map_len, vector_bytes, label_offset, bucket_offset_offset, MAX_CANDIDATES);
+    fprintf(stderr, "loaded exact-i16-packed index: %u vectors, index=%zu bytes, vector_bytes=%zu, label_offset=%u\n",
+            g_count, g_map_len, vec_bytes, label_offset);
 }
 
 static inline void send_static(int fd, StaticResp r) {
@@ -664,13 +534,14 @@ static int process_one_request(int fd, char *req, char *body, size_t body_len) {
 
     if (strncmp(req, "POST /fraud-score", 17)) {
         send_static(fd, NOT_FOUND_RESP);
-        return 1;
+        return 0;
     }
 
     int16_t q[DIMS] __attribute__((aligned(32)));
     vectorize_fast(body, body + body_len, q);
 
-    int frauds = fraud_count_bucket(q);
+    int frauds = fraud_count_exact(q);
+
     if (frauds < 0) frauds = 0;
     if (frauds > 5) frauds = 5;
 
@@ -705,20 +576,10 @@ static void handle_client(int fd) {
             }
 
             if (used >= header_len + (size_t)content_len) {
-                size_t req_len = header_len + (size_t)content_len;
-                buf[req_len] = 0;
-
-                int should_close = process_one_request(fd, buf, buf + header_len, (size_t)content_len);
-                if (should_close) {
-                    close(fd);
-                    return;
-                }
-
-                size_t remaining = used - req_len;
-                if (remaining > 0) memmove(buf, buf + req_len, remaining);
-                used = remaining;
-                if (used < REQ_MAX) buf[used] = 0;
-                continue;
+                buf[header_len + (size_t)content_len] = 0;
+                process_one_request(fd, buf, buf + header_len, (size_t)content_len);
+                close(fd);
+                return;
             }
         }
 
@@ -842,7 +703,7 @@ int main(int argc, char **argv) {
     const char *sock_path = getenv("SOCKET_PATH");
     int fd = (sock_path && sock_path[0]) ? make_unix_socket(sock_path) : make_tcp_socket();
 
-    fprintf(stderr, "server ready, mode=bucket-exact16-neighbors-keepalive, refs=%u, threads=%d\n", g_count, threads);
+    fprintf(stderr, "server ready, mode=exact-i16-packed, refs=%u, threads=%d\n", g_count, threads);
 
     pthread_t th[8];
 

@@ -17,7 +17,7 @@ RUN gcc -O3 -flto -march=haswell -mavx2 -mfma -mbmi2 -mpopcnt \
     -fomit-frame-pointer -fno-math-errno -DNDEBUG \
     -pthread -o rinha server.c -lm
 
-ARG MAX_REFS=500000
+ARG MAX_REFS=35000
 RUN gzip -dc /src/resources/references.json.gz | MAX_REFS=${MAX_REFS} ./builder /src/index.bin
 
 FROM alpine:3.20
