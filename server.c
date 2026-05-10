@@ -29,9 +29,9 @@
 #define FULL_DIMS 16
 #define BUCKET_BITS 11
 #define BUCKET_COUNT (1u << BUCKET_BITS)
-#define MIN_CANDIDATES 512
-#define MAX_CANDIDATES 8192
-#define MAX_BUCKET_RADIUS 10
+#define MIN_CANDIDATES 256
+#define MAX_CANDIDATES 2048
+#define MAX_BUCKET_RADIUS 4
 #define MAGIC 0x314B42484E4952ULL /* RINHBK1 */
 #define REQ_MAX 16384
 #define Q 8192
@@ -45,6 +45,8 @@ static uint32_t g_count;
 static int16_t *g_full_vectors;
 static uint8_t *g_labels;
 static uint32_t *g_bucket_offsets;
+static uint16_t g_bucket_neighbors[BUCKET_COUNT][BUCKET_COUNT];
+static uint16_t g_bucket_radius_end[BUCKET_COUNT][MAX_BUCKET_RADIUS + 1];
 static size_t g_map_len;
 
 static const StaticResp READY_RESP = {
@@ -467,6 +469,22 @@ static inline uint32_t bucket_key_distance(uint16_t a, uint16_t b) {
     return d;
 }
 
+static void precompute_bucket_neighbors(void) {
+    for (uint32_t q = 0; q < BUCKET_COUNT; q++) {
+        uint32_t pos = 0;
+
+        for (uint32_t radius = 0; radius <= MAX_BUCKET_RADIUS; radius++) {
+            for (uint32_t b = 0; b < BUCKET_COUNT; b++) {
+                if (bucket_key_distance((uint16_t)q, (uint16_t)b) == radius) {
+                    g_bucket_neighbors[q][pos++] = (uint16_t)b;
+                }
+            }
+            g_bucket_radius_end[q][radius] = (uint16_t)pos;
+        }
+    }
+}
+
+
 typedef struct {
     uint64_t best_d[5];
     uint8_t best_l[5];
@@ -526,11 +544,13 @@ static int fraud_count_bucket(const int16_t qfull[FULL_DIMS]) {
 
     uint16_t qbucket = bucket_key_from_full16(qfull);
 
+    uint32_t neighbor_pos = 0;
+
     for (uint32_t radius = 0; radius <= MAX_BUCKET_RADIUS && st.scanned < MAX_CANDIDATES; radius++) {
-        for (uint32_t b = 0; b < BUCKET_COUNT && st.scanned < MAX_CANDIDATES; b++) {
-            if (bucket_key_distance(qbucket, (uint16_t)b) == radius) {
-                scan_bucket((uint16_t)b, qfull, &st);
-            }
+        uint32_t end = g_bucket_radius_end[qbucket][radius];
+
+        for (; neighbor_pos < end && st.scanned < MAX_CANDIDATES; neighbor_pos++) {
+            scan_bucket(g_bucket_neighbors[qbucket][neighbor_pos], qfull, &st);
         }
 
         if (st.scanned >= MIN_CANDIDATES && radius >= 1) break;
@@ -617,8 +637,10 @@ static void load_index(const char *path) {
         exit(1);
     }
 
+    precompute_bucket_neighbors();
+
     fprintf(stderr,
-            "loaded bucket-exact16 index: %u vectors, index=%zu bytes, vector_bytes=%zu, label_offset=%u, bucket_offset=%u, max_candidates=%u\n",
+            "loaded bucket-exact16-neighbors index: %u vectors, index=%zu bytes, vector_bytes=%zu, label_offset=%u, bucket_offset=%u, max_candidates=%u\n",
             g_count, g_map_len, vector_bytes, label_offset, bucket_offset_offset, MAX_CANDIDATES);
 }
 
@@ -820,7 +842,7 @@ int main(int argc, char **argv) {
     const char *sock_path = getenv("SOCKET_PATH");
     int fd = (sock_path && sock_path[0]) ? make_unix_socket(sock_path) : make_tcp_socket();
 
-    fprintf(stderr, "server ready, mode=bucket-exact16-keepalive, refs=%u, threads=%d\n", g_count, threads);
+    fprintf(stderr, "server ready, mode=bucket-exact16-neighbors-keepalive, refs=%u, threads=%d\n", g_count, threads);
 
     pthread_t th[8];
 
